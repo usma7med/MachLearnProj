@@ -5,25 +5,163 @@ date: "Monday, May 18, 2015"
 output: html_document
 ---
 
-## Stage 1: Pre-processing
-
+Let's set the working directory and load the caret package.
 ```{r}
-data <- read.csv("pml-training.csv")
-dim(data)
-```
+library(caret)
+setwd("~/Courses/Online Courses/Practical Machine Learning/Project/MachLearnProj")
+````
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r}
-summary(cars)
-```
-
-You can also embed plots, for example:
-
+**Note**: I will load my saved R workspace (Rdata file) so that I don't have to train the models again while generating the html from R markdown.
 ```{r, echo=FALSE}
-plot(cars)
+load('pcm_train.Rdata')
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+## 1: Pre-processing
+Let's read in the data. The csv file has strings "#DIV/0!" which will be treated like missing values.
+```{r}
+data <- read.csv("pml-training.csv",na.strings=c("NA","#DIV/0!")) 
+dim(data)
+set.seed(3440)
+```
+
+Now we create training and test data sets. We will use 2 methods to estimate out of sample error.
+**1.** We will do 10-fold cross-validation on the training sample.
+**2.** Then we will apply our model one time to the hold-out test sample.
+
+
+```{r}
+index <- createDataPartition(data$classe, p=0.75, list=FALSE)
+training <- data[index,] # will do cross-validation on this
+testing <- data[-index,] # hold out sample
+rm(data) # clean up memory
+```
+
+I now proceed to picking variables that can be potential predictors.
+Since some variables have missing values that cannot be handled by many prediction techniques, I will replace missing values by zeros.
+
+```{r}
+NAtoZero <- function(df)
+{
+  df[is.na(df)] <- 0
+  return(df)
+}
+
+training <- NAtoZero(training)
+testing <- NAtoZero(testing)
+```
+
+Variables with near zero variance do not make good predictors as they are close to being constants, and a constant cannot predict the outcome (the classe variable).
+I will remove variables with near-zero-variance from the datasets.
+
+
+```{r}
+nsv <- nearZeroVar(training, saveMetrics=TRUE)
+rownames(nsv)[nsv$nzv == TRUE] # vars which are almost a constant, these are 95%+ NA's
+del_names <- rownames(nsv)[nsv$nzv == TRUE] # do not use these vars
+del_names <- c(del_names,"X") # must remove row number variable
+training <- training[, !(names(training) %in% del_names)]
+testing <- testing[, !(names(testing) %in% del_names)]
+```
+
+`r dim(training)[2]` variables remain to be used as predictors.
+
+
+## 2: Using Random Forests 
+
+The following code was run to train the predictor on the training data set. 10 fold cross-validation was used. The train() results showed that best accuracy was obtained with mytry=41. The mtry parameter controls how many of the predictors are used in each decision tree of the forest. I get good results with mtry=41 or 42.
+
+```{r, eval=FALSE}
+ctrl <- trainControl(method="cv") # default is 10 folds for "cv" method
+rf_modfit <- train(classe ~ ., data=training,method="rf", trControl=ctrl, prox=TRUE)
+```
+
+Since the above code takes a long time to run, a value of mtry can be specified as shown below to reduce the computation time. 
+
+```{r, eval=FALSE}
+rf_modfit <- train(classe ~ ., data=training,method="rf", trControl=ctrl, prox=TRUE,tuneGrid=data.frame(mtry=42))
+```
+
+We have two ways to estimate the accuracy (or out of sample expected error) of our Random Forest predictor.
+ 1. Use 10 fold cross validation
+ 2. Apply predictor to the testing dataset
+ 
+10 fold cross validation results are provided in the object returned by the train() command. The average accuracy across the 10 folds is 99.95%
+```{r}
+print(rf_modfit)
+```
+
+Let's apply this predictor to the test data set and see how accurate this predictor is.
+```{r}
+testpred <- predict(rf_modfit,testing)
+table(testpred, testing$classe)
+```
+
+The accruacy over the testing data set is 99.86%. That seems pretty good.
+```{r}
+confusionMatrix(testpred, testing$classe)
+```
+
+So both the testing dataset and 10 fold cross validation show a very high accuracy for the Random Forest based predictor.
+
+
+## 3: Using Bagged Tree
+
+Let's see how a bagged decision tree predictor performs.
+
+```{r, eval=FALSE}
+ctrl <- trainControl(method="cv") # default is 10 folds for "cv" method
+tb_modfit <- train(classe ~ ., data=training,method="treebag", trControl=ctrl)
+```
+
+The 10 fold cross-validation accuracy is 99.87%
+```{r}
+print(tb_modfit)
+```
+
+Let's see prediction accuracy when applied to testing data set.
+```{r}
+testpred2 <- predict(tb_modfit,testing)
+table(testpred2, testing$classe)
+confusionMatrix(testpred2, testing$classe)
+```
+
+For the bagged tree, testing data set shows an accuracy of 99.88%. Six testing set observation were wrongly classified. So the bagged tree performs just as well as a random forest in this case.
+
+## 4: Let's generate predictions for the assignment (given test data of 20 observations)
+
+First we will pre-process the 20 rows exactly like we did for developing our predictor.
+
+```{r}
+tdata <- read.csv("pml-testing.csv",na.strings=c("NA","#DIV/0!")) 
+tdata <- NAtoZero(tdata)
+testdata<- tdata[, !(names(tdata) %in% del_names)]
+dim(testdata)
+```
+
+Let's apply both of our predictors to get our predictions for these 20 observations.
+```{r}
+answers <- predict(rf_modfit,testdata)
+answers2 <- predict(tb_modfit, testdata)
+sum(answers==answers2)
+```
+
+The last command shows that both predictors give exactly the same predictions for all 20 observations. These predictions are:
+```{r, echo=FALSE}
+answers
+```
+
+The following code generates text-files of these predictions that can be uploaded on the assignment page.
+```{r, eval=FALSE}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(answers)
+```
+
+
+
